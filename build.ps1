@@ -80,7 +80,7 @@ if ((Get-Command link).Source -notmatch 'MSVC') { throw "'link' is not the MSVC 
 # --- Fritzing source, then the versions it needs ---
 if (-not (Test-Path "fritzing-app")) {
     Retry { if (Test-Path fritzing-app) { Remove-Item fritzing-app -Recurse -Force }
-        git clone --quiet --filter=blob:none https://github.com/fritzing/fritzing-app.git fritzing-app }
+        git clone --quiet --filter=blob:none https://github.com/MegaSova/fritzing-app.git fritzing-app }
 }
 Retry { git -C fritzing-app fetch --quiet --tags origin }
 $resolved = Versions @("resolve", "fritzing-app", $Ref)

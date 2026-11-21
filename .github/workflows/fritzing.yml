@@ -62,7 +62,7 @@ jobs:
             exit 1
           fi
 
-          git clone --quiet --filter=blob:none --no-checkout https://github.com/fritzing/fritzing-app.git _app
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/MegaSova/fritzing-app.git _app
           eval "$(python3 -I fritzing_versions.py resolve _app "$WANTED")"
           git -C _app checkout --quiet "$REF" -- phoenix.pro pri
           deps="$(python3 -I fritzing_versions.py deps _app)"

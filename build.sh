@@ -58,7 +58,7 @@ SF=https://downloads.sourceforge.net/project
 SF_MASTER=https://master.dl.sourceforge.net/project
 
 # --- Fritzing source, then the versions it needs ---
-[ -d fritzing-app ] || retry sh -c 'rm -rf fritzing-app && git clone --quiet --filter=blob:none https://github.com/fritzing/fritzing-app.git fritzing-app'
+[ -d fritzing-app ] || retry sh -c 'rm -rf fritzing-app && git clone --quiet --filter=blob:none https://github.com/MegaSova/fritzing-app.git fritzing-app'
 retry git -C fritzing-app fetch --quiet --tags origin
 eval "$(python3 -I "$ROOT/fritzing_versions.py" resolve fritzing-app "$REF")"
 VERSION="${4:-$VERSION}"
