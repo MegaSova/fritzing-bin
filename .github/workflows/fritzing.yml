@@ -1,0 +1,219 @@
+name: fritzing
+
+on:
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: "Windows (x64)"
+        type: boolean
+        default: false
+      macos:
+        description: "MacOS (Intel and Apple Silicon)"
+        type: boolean
+        default: false
+      linux:
+        description: "Linux (x64)"
+        type: boolean
+        default: false
+      version:
+        description: "Fritzing version. Leave empty for the latest stable version."
+        required: false
+  # monthly test build of all systems in this repo only (not in forks), without downloads:
+  # shows when a runner image, Qt or Fritzing update breaks the build
+  schedule:
+    - cron: "17 5 3 * *"
+
+concurrency:
+  group: fritzing-${{ github.ref }}-${{ inputs.windows }}-${{ inputs.macos }}-${{ inputs.linux }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Actions are pinned to commit IDs; the comment shows the version. Dependabot updates them.
+jobs:
+  # Finds the Fritzing commit, the Qt version and the dependency versions, once for all builds
+  plan:
+    if: github.event_name != 'schedule' || !github.event.repository.fork
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      ref: ${{ steps.plan.outputs.ref }}
+      version: ${{ steps.plan.outputs.version }}
+      qt: ${{ steps.plan.outputs.qt }}
+      deps: ${{ steps.plan.outputs.deps }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - id: plan
+        env:
+          SELECTED: ${{ github.event_name == 'schedule' && '{"windows":true,"macos":true,"linux":true}' || toJSON(inputs) }}
+          WANTED: ${{ inputs.version }}
+        run: |
+          all='[
+            {"id":"windows-x64", "input":"windows", "label":"Windows (x64)",                   "group":"windows", "runner":"windows-latest", "container":"",             "script":"build.ps1"},
+            {"id":"macos",       "input":"macos",   "label":"MacOS (Intel and Apple Silicon)", "group":"macos",   "runner":"macos-latest",   "container":"",             "script":"build.sh"},
+            {"id":"linux-x64",   "input":"linux",   "label":"Linux (x64)",                     "group":"linux",   "runner":"ubuntu-latest",  "container":"ubuntu:22.04", "script":"build.sh"}
+          ]'
+          matrix="$(jq -c --argjson sel "$SELECTED" 'map(select($sel[.input] == true or $sel[.input] == "true"))' <<<"$all")"
+          if [ "$matrix" = "[]" ]; then
+            echo "::error::Select at least one computer (Windows, MacOS or Linux), then click Run workflow again."
+            exit 1
+          fi
+
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/fritzing/fritzing-app.git _app
+          eval "$(python3 -I fritzing_versions.py resolve _app "$WANTED")"
+          git -C _app checkout --quiet "$REF" -- phoenix.pro pri
+          deps="$(python3 -I fritzing_versions.py deps _app)"
+          eval "$deps"
+
+          # newest Qt that Fritzing accepts and that exists for all three systems
+          pip install --quiet "aqtinstall>=3.3,<4"
+          qt="$(QT_LEAST="$QT_LEAST" QT_MOST="$QT_MOST" python3 -I -c '
+          import os, subprocess
+          v = lambda s: tuple(int(x) for x in s.split("."))
+          def available(host):
+              out = subprocess.run(["aqt", "list-qt", host, "desktop"], capture_output=True, text=True, check=True).stdout
+              return {v(x) for x in out.split() if x.count(".") == 2}
+          ok = [x for x in available("linux") & available("windows") & available("mac")
+                if v(os.environ["QT_LEAST"]) <= x <= v(os.environ["QT_MOST"])]
+          print(".".join(map(str, max(ok))) if ok else "")')"
+          [ -n "$qt" ] || { echo "::error::No Qt between $QT_LEAST and $QT_MOST is available"; exit 1; }
+
+          echo "Fritzing $VERSION ($REF), Qt $qt"
+          {
+            echo "matrix=$matrix"
+            echo "ref=$REF"
+            echo "version=$VERSION"
+            echo "qt=$qt"
+            echo "deps=$(printf '%s %s' "$qt" "$deps" | sha256sum | cut -c1-16)"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    # Linux: the oldest supported Ubuntu, so the AppImage runs on older distributions too
+    container: ${{ matrix.container }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+
+      - name: Install build tools (Linux)
+        if: matrix.group == 'linux'
+        run: |
+          apt-get -o Acquire::Retries=3 update -q
+          DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -yq --no-install-recommends \
+            ca-certificates git curl unzip file zstd python3 python3-pip python-is-python3 build-essential cmake \
+            pkg-config ccache libssl-dev libudev-dev libgl1-mesa-dev libegl1 libfontconfig1-dev libdbus-1-3 \
+            libglib2.0-0 libx11-xcb1 libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
+            libwayland-client0 libwayland-cursor0 libwayland-egl1 libgtk-3-0 libcups2
+          git config --global --add safe.directory '*'
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@b344308e4483fc892e0d27b3cd1b173ebdd95f06  # v4.5.0
+        with:
+          version: ${{ needs.plan.outputs.qt }}
+          modules: qtserialport qt5compat
+          cache: true
+          install-deps: ${{ matrix.container && 'nosudo' || 'true' }}
+          setup-python: ${{ !matrix.container }}
+
+      # only the dependency part of the script: other edits keep the cache
+      - name: Dependency recipe
+        id: recipe
+        shell: bash
+        run: echo "hash=$(sed -n '/^# --- dependencies ---/,/^# --- build ---/p' '${{ matrix.script }}' | git hash-object --stdin)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            boost_*_0/boost
+            svgpp-*
+            zlib
+            libgit2-*
+            Clipper1-*
+            quazip-*
+            ngspice-*
+          key: deps-${{ matrix.id }}-${{ needs.plan.outputs.deps }}-${{ steps.recipe.outputs.hash }}
+
+      - name: Compiler cache (MacOS, Linux)
+        if: matrix.group != 'windows'
+        uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d  # v1.2.24
+        with:
+          key: ${{ matrix.id }}
+          max-size: 1G
+          evict-old-files: job
+          job-summary: ''
+
+      # not Git Bash: its /usr/bin/link would shadow the MSVC linker
+      - name: Build Fritzing (Windows)
+        if: matrix.group == 'windows'
+        shell: pwsh
+        run: ./build.ps1 -Ref "${{ needs.plan.outputs.ref }}" -Platform "${{ matrix.id }}" -Version "${{ needs.plan.outputs.version }}"
+
+      - name: Build Fritzing (MacOS, Linux)
+        if: matrix.group != 'windows'
+        shell: bash
+        run: bash build.sh "${{ matrix.group }}" "${{ needs.plan.outputs.ref }}" "${{ matrix.id }}" "${{ needs.plan.outputs.version }}"
+
+      - name: Upload
+        if: github.event_name != 'schedule'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          path: github/*
+          archive: false
+          retention-days: 2
+          if-no-files-found: error
+
+      - name: Summary
+        if: github.event_name != 'schedule'
+        shell: bash
+        run: |
+          f="$(ls github)"
+          sum="$( (sha256sum "github/$f" 2>/dev/null || shasum -a 256 "github/$f") | cut -d' ' -f1)"
+          {
+            echo "### ${{ matrix.label }}"
+            echo
+            echo "**1. Download.** Scroll down to **Artifacts** and click **$f**. GitHub deletes it after 2 days."
+            echo
+            case "${{ matrix.group }}" in
+              windows) cat <<'EOF'
+          **2. Unzip.** Right-click the downloaded file and select **Extract All**, then **Extract**. Fritzing does not start from inside the zip file.
+
+          **3. Start.** Open the new folder and double-click **Fritzing** (Fritzing.exe).
+
+          **4. First start only.** Windows shows "Windows protected your PC", because this build is not signed. Click **More info**, then **Run anyway**.
+          EOF
+              ;;
+              macos) cat <<'EOF'
+          **2. Unzip.** Double-click the downloaded file. You get **Fritzing**. Drag it into your **Applications** folder.
+
+          **3. Start.** Double-click **Fritzing**. macOS shows a warning, because Apple did not check this build. Click **Done** (or **Cancel**).
+
+          **4. Allow it, first start only.** Open **System Settings**, then **Privacy & Security**. Scroll down and click **Open Anyway** next to "Fritzing". Enter your password. Click **Open Anyway** again.
+
+          If macOS says the app "is damaged", open **Terminal**, paste `xattr -cr /Applications/Fritzing.app`, press Return, and start Fritzing again.
+          EOF
+              ;;
+              linux) cat <<'EOF'
+          **2. Open a terminal in the download folder.** Open a terminal, type `cd ~/Downloads` and press Enter.
+
+          EOF
+                printf '**3. Allow it to run, first time only.** Type `chmod +x %s` and press Enter.\n\n' "$f"
+                printf '**4. Start.** Type `./%s` and press Enter. After step 3, a double-click on the file also starts it in most file managers.\n\n' "$f"
+                printf 'If you see an error about FUSE: type `./%s --appimage-extract-and-run` and press Enter.\n' "$f"
+              ;;
+            esac
+            echo
+            echo "<sub>SHA-256: \`$sum\`</sub>"
+          } >> "$GITHUB_STEP_SUMMARY"

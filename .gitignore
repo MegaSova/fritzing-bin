@@ -1,0 +1,14 @@
+# everything build.sh / build.ps1 downloads or creates
+/*
+!/.github/
+!/.gitattributes
+!/.gitignore
+!/build.ps1
+!/build.sh
+!/fix_parts_xml.py
+!/fritzing_versions.py
+!/LICENSE
+!/README.md
+!/SOURCE.txt
+
+PRIVATE/
